@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Assistant with FastAPI & Gemini</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f4f7f9;
+            color: #333;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        .container {
+            background: #ffffff;
+            padding: 2rem 3rem;
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            width: 90%;
+            max-width: 600px;
+        }
+
+        h1 {
+            color: #1a73e8;
+        }
+
+        #recordButton {
+            padding: 1rem 2rem;
+            font-size: 1.2rem;
+            cursor: pointer;
+            border: none;
+            border-radius: 8px;
+            background-color: #34a853;
+            color: white;
+            transition: background-color 0.3s;
+        }
+
+        #recordButton.recording {
+            background-color: #ea4335;
+        }
+
+        #recordButton:hover {
+            opacity: 0.9;
+        }
+
+        .log-area, .response-area {
+            margin-top: 2rem;
+            text-align: left;
+            background-color: #f8f9fa;
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
+        }
+
+        #status, #responseDisplay {
+            min-height: 40px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            color: #5f6368;
+        }
+
+        #readButton {
+            margin-top: 1rem;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            border: 1px solid #1a73e8;
+            background-color: #fff;
+            color: #1a73e8;
+            border-radius: 5px;
+        }
+
+        #readButton:disabled {
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        .history-area {
+            margin-top: 2rem;
+            text-align: left;
+            max-height: 200px; overflow-y: auto; border: 1px solid #e0e0e0; padding: 1rem; border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Voice Assistant</h1>
+        <p>Click "Start Recording" and speak. The assistant will respond.</p>
+
+        <button id="recordButton">Start Recording</button>
+
+        <div class="log-area">
+            <h2>Log</h2>
+            <div id="status">Awaiting action...</div>
+        </div>
+
+        <div class="response-area">
+            <h2>Assistant's Response</h2>
+            <div id="responseDisplay"></div>
+            <button id="readButton" disabled>Read Aloud</button>
+        </div>
+
+        <div class="history-area">
+            <h2>Conversation History</h2>
+            <div id="historyDisplay"></div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+            const recordButton = document.getElementById("recordButton");
+            const statusDiv = document.getElementById("status");
+            const responseDisplay = document.getElementById("responseDisplay");
+            const readButton = document.getElementById("readButton");
+            const historyDisplay = document.getElementById("historyDisplay");
+
+            let isRecording = false;
+            let mediaRecorder;
+            let audioChunks = [];
+            let conversationHistory = JSON.parse(localStorage.getItem("conversationHistory")) || [];
+
+            // The backend endpoint URL
+            const backendUrl = "http://127.0.0.1:8000/process-audio/"; // Ensure this matches your backend
+
+            // --- Speech Recognition Setup ---
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                alert("Your browser does not support the Web Speech API. Please try Chrome or Edge.");
+                return;
+            }
+            const recognition = new SpeechRecognition();
+
+            updateHistoryDisplay(); // Show history on page load
+
+            recordButton.addEventListener("click", async () => {
+                if (!isRecording) {
+                    // --- Start Recording ---
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        mediaRecorder = new MediaRecorder(stream);
+                        mediaRecorder.start();
+                        
+                        recordButton.textContent = "Stop Recording";
+                        recordButton.classList.add("recording");
+                        statusDiv.textContent = "Recording... Click to stop.";
+                        audioChunks = []; // Reset chunks
+                        
+                        mediaRecorder.addEventListener("dataavailable", event => {
+                            audioChunks.push(event.data);
+                        });
+                        
+                        mediaRecorder.addEventListener("stop", () => {
+                            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                            sendAudioToBackend(audioBlob);
+                            stream.getTracks().forEach(track => track.stop()); // Stop microphone access
+                        });
+                        
+                        isRecording = true;
+                    } catch (error) {
+                        console.error("Error accessing microphone:", error);
+                        statusDiv.textContent = "Error: Could not access microphone. Please grant permission.";
+                    }
+                } else {
+                    // --- Stop Recording --- 
+                    mediaRecorder.stop();
+                    recordButton.textContent = "Start Recording";
+                    recordButton.classList.remove("recording");
+                    isRecording = false;
+                    statusDiv.textContent = "Recording stopped. Processing...";
+                }
+            });
+
+            async function sendAudioToBackend(audioBlob) {
+                const formData = new FormData();
+                formData.append("audio_file", audioBlob, "recording.webm"); // The audio data
+                formData.append("history", JSON.stringify(conversationHistory)); // The conversation history
+
+                try {
+                    const response = await fetch(backendUrl, {
+                        method: "POST",
+                        body: formData
+                    });
+
+                    if (!response.ok) {
+                        let errorDetail = "Server error occurred.";
+                        try {
+                            const errorData = await response.json();
+                            errorDetail = errorData.detail || JSON.stringify(errorData);
+                        } catch (e) {
+                            // Response was not JSON
+                            errorDetail = await response.text();
+                        }
+                        throw new Error(errorDetail);
+                    }
+
+                    const result = await response.json();
+                    statusDiv.textContent = `You said: "${result.transcript}"`;
+                    responseDisplay.textContent = result.response;
+                    readButton.disabled = false; // Enable the button
+
+                    // Update and save history
+                    updateConversationHistory(result.transcript, result.response);
+                    updateHistoryDisplay();
+
+                    readAloud(result.response); // Automatically read the response
+
+                } catch (error) {
+                    console.error("Error sending audio to backend:", error);
+                    statusDiv.textContent = `Error: ${error.message}`;
+                    responseDisplay.textContent = "Failed to get a response from the assistant.";
+                }
+            }
+
+            function readAloud(textToRead) {
+                if (textToRead && 'speechSynthesis' in window) {
+                    const utterance = new SpeechSynthesisUtterance(textToRead);
+                    speechSynthesis.speak(utterance);
+                } else {
+                    alert("Your browser does not support text-to-speech.");
+                }
+            }
+
+            readButton.addEventListener("click", () => {
+                const textToRead = responseDisplay.textContent;
+                readAloud(textToRead);
+            });
+
+            function updateConversationHistory(userText, modelText) {
+                // Gemini API expects a specific format for history
+                conversationHistory.push({ role: "user", parts: [{ text: userText }] });
+                conversationHistory.push({ role: "model", parts: [{ text: modelText }] });
+                localStorage.setItem("conversationHistory", JSON.stringify(conversationHistory));
+            }
+
+            function updateHistoryDisplay() {
+                historyDisplay.innerHTML = "";
+                conversationHistory.forEach(item => {
+                    const entry = document.createElement("div");
+                    const role = item.role === 'user' ? 'You' : 'Assistant';
+                    const text = item.parts[0].text;
+                    entry.innerHTML = `<strong>${role}:</strong> ${text}`;
+                    historyDisplay.appendChild(entry);
+                });
+            }
+        });
+    </script>
+</body>
+</html>
